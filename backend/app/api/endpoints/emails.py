@@ -6,10 +6,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, asc
 
 from backend.app.database.session import get_db
-from backend.app.models.entities import EmailEvent, EmailAnalysis, LoginEvent, AuditLog
+from backend.app.models.entities import EmailEvent, EmailAnalysis, LoginEvent, AuditLog, User
 from backend.app.schemas.schemas import EmailAnalyzeRequest
 from backend.app.ml.email_classifier import email_classifier
 from backend.app.services.correlation_engine import correlation_engine
+from backend.app.services.auth_service import get_current_user_optional, get_current_user
+from backend.app.services.gmail_sync_service import sync_user_gmail
 
 router = APIRouter(prefix="/emails", tags=["Emails"])
 
@@ -60,19 +62,46 @@ def serialize_email(email: EmailEvent) -> dict:
     }
 
 @router.get("")
-def list_emails(
+async def list_emails(
     search: Optional[str] = None,
     predicted_class: Optional[str] = None,
     severity: Optional[str] = None,
     user_id: Optional[str] = None,
+    data_source: Optional[str] = None,
     sort_by: str = Query("timestamp"),
     sort_dir: str = Query("desc"),
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
+    user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
     query = db.query(EmailEvent).outerjoin(EmailAnalysis)
     
+    # User-centric filtering:
+    # If the user is logged into their Google account, show ONLY their real Gmail emails!
+    if user and user.gmail_connected:
+        if data_source == "synthetic":
+            query = query.filter(EmailEvent.data_source == "synthetic")
+        else:
+            # Check if this user's inbox has been synced yet
+            existing_count = db.query(EmailEvent).filter(
+                (EmailEvent.user_id == user.email) | (EmailEvent.data_source == "gmail")
+            ).count()
+            if existing_count == 0 and user.gmail_access_token:
+                try:
+                    await sync_user_gmail(user, db, max_results=30)
+                except Exception as e:
+                    print(f"[Auto Sync on List Emails]: {e}")
+
+            # Filter to show only this user's emails
+            query = query.filter(
+                (EmailEvent.user_id == user.email) | (EmailEvent.data_source == "gmail")
+            )
+    elif user_id:
+        query = query.filter(EmailEvent.user_id == user_id)
+    elif data_source:
+        query = query.filter(EmailEvent.data_source == data_source)
+
     if search:
         search_filter = f"%{search}%"
         query = query.filter(
@@ -90,9 +119,6 @@ def list_emails(
         
     if severity:
         query = query.filter(EmailAnalysis.severity == severity)
-        
-    if user_id:
-        query = query.filter(EmailEvent.user_id == user_id)
         
     total_count = query.count()
     
@@ -117,8 +143,32 @@ def list_emails(
         "page": page,
         "limit": limit,
         "total_pages": (total_count + limit - 1) // limit if limit > 0 else 1,
+        "is_gmail_user": bool(user and user.gmail_connected),
+        "user_email": user.email if user else None,
         "items": [serialize_email(e) for e in emails]
     }
+
+@router.post("/sync-gmail")
+async def sync_gmail_inbox(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Triggers an on-demand sync of the user's Gmail inbox with AI analysis."""
+    if not user.gmail_connected or not user.gmail_access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Gmail is not connected for this account. Please reconnect via Google OAuth."
+        )
+    try:
+        synced = await sync_user_gmail(user, db, max_results=30)
+        return {
+            "success": True,
+            "synced_count": len(synced),
+            "message": f"Successfully synced and analyzed {len(synced)} messages from your Gmail inbox!"
+        }
+    except Exception as e:
+        print(f"[Sync Gmail API Error]: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to sync Gmail: {str(e)}")
 
 @router.get("/{email_id}")
 def get_email_details(email_id: str, db: Session = Depends(get_db)):
@@ -126,7 +176,6 @@ def get_email_details(email_id: str, db: Session = Depends(get_db)):
     if not email:
         raise HTTPException(status_code=404, detail=f"Email with ID '{email_id}' not found")
         
-    # Also fetch recent logins for the same user to show immediate context
     related_logins = (
         db.query(LoginEvent)
         .filter(LoginEvent.user_id == email.user_id)
@@ -157,7 +206,6 @@ def get_email_details(email_id: str, db: Session = Depends(get_db)):
 def analyze_custom_email(req: EmailAnalyzeRequest, db: Session = Depends(get_db)):
     """Analyze a new or ad-hoc email payload using the trained ML model and explainable rules."""
     sender_domain = req.sender_email.split("@")[1] if "@" in req.sender_email else "unknown.com"
-    
     raw_payload = {
         "email_subject": req.email_subject,
         "email_body": req.email_body,
@@ -178,7 +226,6 @@ def analyze_custom_email(req: EmailAnalyzeRequest, db: Session = Depends(get_db)
     
     analysis = email_classifier.analyze_email(raw_payload)
     
-    # Save ad-hoc event
     email_id = f"EMAIL-ADHOC-{int(datetime.datetime.utcnow().timestamp())}"
     new_event = EmailEvent(
         email_id=email_id,
@@ -220,9 +267,7 @@ def analyze_custom_email(req: EmailAnalyzeRequest, db: Session = Depends(get_db)
     )
     db.add(new_analysis)
     
-    # Check if this triggers incident correlation with user's logins
     correlation_engine.correlate_user_events(db, req.user_id)
-    
     db.commit()
     return serialize_email(new_event)
 

@@ -1,33 +1,41 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Mail, 
   Search, 
-  Filter, 
   AlertTriangle, 
   CheckCircle, 
-  ExternalLink, 
   RefreshCw, 
   ShieldAlert, 
   ChevronLeft, 
   ChevronRight,
   Send,
-  Eye,
-  SlidersHorizontal,
   Lock,
   Globe,
-  FileText,
   Inbox,
   Link2,
   Unlink2,
-  MailOpen
+  CheckCircle2,
+  Sparkles,
+  ShieldCheck,
+  ExternalLink
 } from 'lucide-react';
-import { fetchEmails, fetchEmailDetails, analyzeCustomEmail, reanalyzeEmail, fetchGmailMessages, connectGmail, disconnectGmail, fetchIntegrationsStatus } from '../services/api';
+import { 
+  fetchEmails, 
+  fetchEmailDetails, 
+  analyzeCustomEmail, 
+  reanalyzeEmail, 
+  connectGmail, 
+  disconnectGmail, 
+  syncGmailInbox 
+} from '../services/api';
 import { SeverityBadge, RiskScoreBadge, SimulatedDataBanner } from '../components/Badges';
 import { useAuth } from '../context/AuthContext';
 
 export default function EmailInvestigationPage() {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState('synthetic'); // 'synthetic' | 'gmail'
+  const isGmailUser = Boolean(user && (user.gmail_connected || user.google_sub || user.email?.includes('@gmail.com')));
+  const [activeTab, setActiveTab] = useState(isGmailUser ? 'my_gmail' : 'synthetic');
+
   const [emails, setEmails] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -49,15 +57,13 @@ export default function EmailInvestigationPage() {
   // Live Analyzer Modal / Form
   const [showAnalyzer, setShowAnalyzer] = useState(false);
 
-  // Gmail state
-  const [gmailMessages, setGmailMessages] = useState([]);
-  const [gmailLoading, setGmailLoading] = useState(false);
-  const [gmailConnected, setGmailConnected] = useState(false);
-  const [gmailStatus, setGmailStatus] = useState('');
-  const [gmailConnecting, setGmailConnecting] = useState(false);
-  const [selectedGmailMsg, setSelectedGmailMsg] = useState(null);
+  // Gmail sync states
+  const [syncingGmail, setSyncingGmail] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
+  const [connectingGmail, setConnectingGmail] = useState(false);
+
   const [analyzerForm, setAnalyzerForm] = useState({
-    user_id: 'USER-1002',
+    user_id: user?.email || 'USER-1002',
     sender_name: 'IT Helpdesk Support',
     sender_email: 'support@campus-auth-security.xyz',
     email_subject: 'CRITICAL: Account Credentials Verification Required',
@@ -74,10 +80,10 @@ export default function EmailInvestigationPage() {
   const [analyzerResult, setAnalyzerResult] = useState(null);
   const [analyzerLoading, setAnalyzerLoading] = useState(false);
 
-  const loadEmails = async () => {
+  const loadEmails = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await fetchEmails({
+      const params = {
         page,
         limit: 20,
         search: search || undefined,
@@ -85,77 +91,64 @@ export default function EmailInvestigationPage() {
         severity: filterSeverity || undefined,
         sort_by: sortBy,
         sort_dir: sortDir,
-      });
-      setEmails(data.items);
-      setTotal(data.total);
-      setTotalPages(data.total_pages);
+        data_source: activeTab === 'synthetic' ? 'synthetic' : undefined,
+      };
+
+      const data = await fetchEmails(params);
+      setEmails(data.items || []);
+      setTotal(data.total || 0);
+      setTotalPages(data.total_pages || 1);
     } catch (err) {
       console.error('Failed to load emails:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, filterClass, filterSeverity, sortBy, sortDir, activeTab]);
 
   useEffect(() => {
     loadEmails();
-  }, [page, filterClass, filterSeverity, sortBy, sortDir]);
+  }, [loadEmails]);
 
-  // Gmail integration
-  const loadGmailStatus = async () => {
+  // Sync real emails from Gmail API
+  const handleSyncGmail = async () => {
     try {
-      const data = await fetchIntegrationsStatus();
-      setGmailConnected(data.gmail?.connected || false);
+      setSyncingGmail(true);
+      setSyncMessage('');
+      const res = await syncGmailInbox();
+      setSyncMessage(res.message || `Successfully synced ${res.synced_count} emails.`);
+      await loadEmails();
     } catch (err) {
-      console.error('Failed to load integrations status:', err);
-    }
-  };
-
-  const loadGmailMessages = async () => {
-    try {
-      setGmailLoading(true);
-      const data = await fetchGmailMessages();
-      setGmailConnected(data.connected);
-      setGmailMessages(data.messages || []);
-      setGmailStatus(data.message || '');
-    } catch (err) {
-      console.error('Failed to load Gmail messages:', err);
-      setGmailStatus('Failed to fetch Gmail messages.');
+      console.error('Failed to sync Gmail:', err);
+      const detail = err.response?.data?.detail || 'Failed to sync emails from Gmail API.';
+      setSyncMessage(detail);
     } finally {
-      setGmailLoading(false);
+      setSyncingGmail(false);
     }
   };
 
   const handleConnectGmail = async () => {
     try {
-      setGmailConnecting(true);
+      setConnectingGmail(true);
+      setSyncMessage('');
       const data = await connectGmail();
       if (data.url) {
         window.location.href = data.url;
       }
     } catch (err) {
       const detail = err.response?.data?.detail || 'Failed to initiate Gmail connection.';
-      setGmailStatus(detail);
-      setGmailConnecting(false);
+      setSyncMessage(detail);
+      setConnectingGmail(false);
     }
   };
 
   const handleDisconnectGmail = async () => {
     try {
       await disconnectGmail();
-      setGmailConnected(false);
-      setGmailMessages([]);
-      setGmailStatus('Gmail disconnected successfully.');
+      loadEmails();
     } catch (err) {
       console.error('Failed to disconnect Gmail:', err);
     }
   };
-
-  useEffect(() => {
-    if (activeTab === 'gmail') {
-      loadGmailStatus();
-      loadGmailMessages();
-    }
-  }, [activeTab]);
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
@@ -194,7 +187,7 @@ export default function EmailInvestigationPage() {
       setAnalyzerLoading(true);
       const result = await analyzeCustomEmail(analyzerForm);
       setAnalyzerResult(result);
-      loadEmails(); // Refresh list to include ad-hoc event
+      loadEmails();
     } catch (err) {
       console.error('Analyzer error:', err);
     } finally {
@@ -218,8 +211,14 @@ export default function EmailInvestigationPage() {
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={() => setShowAnalyzer(true)}
-            className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white shadow-md shadow-sky-600/20 transition"
+            onClick={() => {
+              setAnalyzerForm(prev => ({
+                ...prev,
+                user_id: user?.email || 'MY-GMAIL-USER'
+              }));
+              setShowAnalyzer(true);
+            }}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white shadow-md shadow-sky-600/20 transition cursor-pointer"
           >
             <Send className="w-3.5 h-3.5" />
             <span>Live Phishing Tester</span>
@@ -227,38 +226,136 @@ export default function EmailInvestigationPage() {
         </div>
       </div>
 
-      {/* Tab Switcher: Synthetic Data vs My Gmail */}
-      <div className="flex items-center gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800 w-fit">
-        <button
-          onClick={() => setActiveTab('synthetic')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition ${
-            activeTab === 'synthetic'
-              ? 'bg-sky-600 text-white shadow-lg shadow-sky-600/20'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-          }`}
-        >
-          <ShieldAlert className="w-3.5 h-3.5" />
-          <span>Security Telemetry (Synthetic)</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('gmail')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition ${
-            activeTab === 'gmail'
-              ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-          }`}
-        >
-          <Inbox className="w-3.5 h-3.5" />
-          <span>My Gmail Inbox</span>
-          {gmailConnected && (
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          )}
-        </button>
+      {/* Mode Switcher Tabs */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800">
+          <button
+            onClick={() => { setActiveTab('my_gmail'); setPage(1); }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              activeTab === 'my_gmail'
+                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+          >
+            <Inbox className="w-3.5 h-3.5" />
+            <span>My Gmail Account ({user?.email || 'Personal'})</span>
+            {user?.gmail_connected && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            )}
+          </button>
+          <button
+            onClick={() => { setActiveTab('synthetic'); setPage(1); }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              activeTab === 'synthetic'
+                ? 'bg-sky-600 text-white shadow-lg shadow-sky-600/20'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>Campus Benchmark Dataset (Synthetic)</span>
+          </button>
+        </div>
+
+        {/* Sync or Connect Button for Real Gmail */}
+        {activeTab === 'my_gmail' && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleConnectGmail}
+              disabled={connectingGmail}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition cursor-pointer"
+              title="Grant or Refresh Gmail Permissions with Google"
+            >
+              <Link2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>{connectingGmail ? 'Redirecting...' : 'Grant / Refresh Gmail Scope'}</span>
+            </button>
+            <button
+              onClick={handleSyncGmail}
+              disabled={syncingGmail}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-semibold shadow-md shadow-emerald-600/20 transition cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${syncingGmail ? 'animate-spin' : ''}`} />
+              <span>{syncingGmail ? 'Syncing Gmail...' : 'Sync Real Emails Now'}</span>
+            </button>
+          </div>
+        )}
       </div>
 
-      {activeTab === 'synthetic' && (
-      <>
-      <SimulatedDataBanner />
+      {/* Active Mailbox Status Banner */}
+      {activeTab === 'my_gmail' ? (
+        <div className="space-y-3">
+          <div className="cyber-card p-4 border border-emerald-500/30 bg-emerald-950/20 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-100">Live Gmail Account:</span>
+                  <span className="font-mono text-xs text-emerald-300 font-semibold">{user?.email || 'Logged In Account'}</span>
+                  <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
+                    REAL MAILS FILTER ACTIVE
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Showing emails directly from your Google account evaluated by the AI Phishing Detector.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-end sm:self-center">
+              <button
+                onClick={handleSyncGmail}
+                disabled={syncingGmail}
+                className="px-3 py-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-300 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <RefreshCw className={`w-3 h-3 ${syncingGmail ? 'animate-spin' : ''}`} />
+                <span>Sync</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Sync status alert if error or message */}
+          {syncMessage && (
+            <div className={`text-xs p-3.5 rounded-xl border flex items-start gap-3 ${
+              syncMessage.toLowerCase().includes('error') || syncMessage.toLowerCase().includes('denied') || syncMessage.toLowerCase().includes('not enabled') || syncMessage.toLowerCase().includes('failed')
+                ? 'text-rose-200 bg-rose-950/70 border-rose-500/50'
+                : 'text-emerald-300 bg-emerald-950/70 border-emerald-500/40'
+            }`}>
+              {syncMessage.toLowerCase().includes('error') || syncMessage.toLowerCase().includes('denied') || syncMessage.toLowerCase().includes('not enabled') ? (
+                <AlertTriangle className="w-5 h-5 shrink-0 text-rose-400 mt-0.5" />
+              ) : (
+                <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400 mt-0.5" />
+              )}
+              <div className="space-y-1 flex-1">
+                <p className="font-semibold">{syncMessage}</p>
+                {syncMessage.includes('console.cloud.google.com') && (
+                  <p className="pt-1">
+                    <a
+                      href="https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-sky-400 hover:underline font-semibold inline-flex items-center gap-1"
+                    >
+                      Click here to open Google Cloud Console and Enable Gmail API <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </p>
+                )}
+                {syncMessage.includes('Permission Denied') && (
+                  <button
+                    onClick={handleConnectGmail}
+                    className="mt-2 px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded font-medium text-xs cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <Link2 className="w-3 h-3" />
+                    <span>Click here to Authorize Gmail Read Permission</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <SimulatedDataBanner />
+      )}
 
       {/* Filter and Search Bar */}
       <div className="cyber-card p-4 border border-slate-800">
@@ -268,7 +365,7 @@ export default function EmailInvestigationPage() {
             <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Search by subject, sender, or user ID..."
+              placeholder={activeTab === 'my_gmail' ? "Search your inbox messages..." : "Search synthetic emails..."}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-3 py-1.5 bg-slate-900/90 border border-slate-700/80 rounded-lg text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500"
@@ -318,11 +415,11 @@ export default function EmailInvestigationPage() {
         </form>
       </div>
 
-      {/* Email Table */}
+      {/* Main Email Table */}
       <div className="cyber-card border border-slate-800 overflow-hidden">
         <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
           <span className="text-xs font-semibold text-slate-300">
-            Total Telemetry Records: <span className="font-mono text-sky-400">{total}</span>
+            {activeTab === 'my_gmail' ? 'Your Gmail Messages' : 'Telemetry Records'}: <span className="font-mono text-emerald-400">{total}</span>
           </span>
           <span className="text-[11px] text-slate-500">Page {page} of {totalPages}</span>
         </div>
@@ -331,41 +428,62 @@ export default function EmailInvestigationPage() {
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-900/80 text-slate-400 font-mono uppercase text-[10px] tracking-wider border-b border-slate-800">
               <tr>
-                <th className="py-3 px-4">Email ID</th>
-                <th className="py-3 px-4">User</th>
                 <th className="py-3 px-4">Subject</th>
                 <th className="py-3 px-4">Sender</th>
                 <th className="py-3 px-4">ML Class</th>
                 <th className="py-3 px-4">Risk Score</th>
                 <th className="py-3 px-4">Severity</th>
+                <th className="py-3 px-4">Source</th>
                 <th className="py-3 px-4">Date</th>
-                <th className="py-3 px-4 text-right">Action</th>
+                <th className="py-3 px-4 text-right">Inspect</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400 font-mono">
+                  <td colSpan={8} className="py-12 text-center text-slate-400 font-mono">
                     <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-sky-400" />
-                    Fetching Email Telemetry...
+                    Loading Emails & Threat Analysis...
                   </td>
                 </tr>
               ) : emails.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-500 font-mono">
-                    No email records found matching the query criteria.
+                  <td colSpan={8} className="py-12 text-center text-slate-400 font-mono space-y-4">
+                    <p className="text-sm font-semibold text-slate-300">No emails loaded for your Gmail account yet.</p>
+                    <p className="text-xs text-slate-500 max-w-md mx-auto">
+                      Click the buttons below to grant read-only permissions and sync your inbox messages.
+                    </p>
+                    {activeTab === 'my_gmail' && (
+                      <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                        <button
+                          onClick={handleConnectGmail}
+                          disabled={connectingGmail}
+                          className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-sky-600/20 transition cursor-pointer flex items-center gap-2"
+                        >
+                          <Link2 className="w-4 h-4" />
+                          <span>{connectingGmail ? 'Redirecting to Google...' : '1. Authorize Gmail Access (Google Consent)'}</span>
+                        </button>
+                        <button
+                          onClick={handleSyncGmail}
+                          disabled={syncingGmail}
+                          className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-emerald-600/20 transition cursor-pointer flex items-center gap-2"
+                        >
+                          <RefreshCw className={`w-4 h-4 ${syncingGmail ? 'animate-spin' : ''}`} />
+                          <span>{syncingGmail ? 'Syncing...' : '2. Sync & Analyze Real Emails'}</span>
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ) : (
                 emails.map((e) => (
                   <tr key={e.email_id} className="hover:bg-slate-800/30 transition">
-                    <td className="py-3 px-4 font-mono text-[11px] text-sky-400">{e.email_id}</td>
-                    <td className="py-3 px-4 font-mono text-slate-300">{e.user_id}</td>
-                    <td className="py-3 px-4 max-w-xs truncate font-medium text-slate-200">
+                    <td className="py-3 px-4 max-w-sm truncate font-medium text-slate-200">
                       {e.email_subject}
                     </td>
-                    <td className="py-3 px-4 max-w-[180px] truncate text-slate-400">
-                      {e.sender_email}
+                    <td className="py-3 px-4 max-w-[200px] truncate text-slate-400">
+                      <span className="text-slate-300 block">{e.sender_name || e.sender_email}</span>
+                      <span className="text-[10px] font-mono text-slate-500">{e.sender_email}</span>
                     </td>
                     <td className="py-3 px-4">
                       <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase ${
@@ -382,13 +500,22 @@ export default function EmailInvestigationPage() {
                     <td className="py-3 px-4">
                       <SeverityBadge severity={e.analysis?.severity} />
                     </td>
+                    <td className="py-3 px-4 font-mono text-[10px]">
+                      <span className={`px-1.5 py-0.5 rounded border ${
+                        e.data_source === 'gmail'
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-semibold'
+                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                      }`}>
+                        {e.data_source === 'gmail' ? 'REAL GMAIL' : 'SYNTHETIC'}
+                      </span>
+                    </td>
                     <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
                       {new Date(e.timestamp).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
                         onClick={() => handleOpenDetails(e.email_id)}
-                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium border border-slate-700 transition"
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium border border-slate-700 transition cursor-pointer"
                       >
                         Inspect
                       </button>
@@ -419,193 +546,6 @@ export default function EmailInvestigationPage() {
           </button>
         </div>
       </div>
-      </>
-      )}
-
-      {/* ===== GMAIL TAB ===== */}
-      {activeTab === 'gmail' && (
-        <div className="space-y-5">
-          {/* Gmail Connection Status Card */}
-          <div className="cyber-card p-5 border border-slate-800">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                  gmailConnected 
-                    ? 'bg-emerald-500/15 border border-emerald-500/30' 
-                    : 'bg-slate-800 border border-slate-700'
-                }`}>
-                  <Inbox className={`w-5 h-5 ${gmailConnected ? 'text-emerald-400' : 'text-slate-400'}`} />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-100">Gmail Integration</h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    {gmailConnected 
-                      ? `Connected as ${user?.email || 'your account'} — Read-Only access (gmail.readonly)`
-                      : 'Connect your Gmail to view real inbox messages. Uses read-only access — we never modify your mail.'
-                    }
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                {gmailConnected ? (
-                  <>
-                    <button
-                      onClick={loadGmailMessages}
-                      disabled={gmailLoading}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded-lg text-slate-300 border border-slate-700 transition"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${gmailLoading ? 'animate-spin' : ''}`} />
-                      <span>Refresh</span>
-                    </button>
-                    <button
-                      onClick={handleDisconnectGmail}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-xs rounded-lg text-rose-300 border border-rose-500/30 transition"
-                    >
-                      <Unlink2 className="w-3.5 h-3.5" />
-                      <span>Disconnect</span>
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    onClick={handleConnectGmail}
-                    disabled={gmailConnecting}
-                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold rounded-lg text-white shadow-md shadow-emerald-600/20 transition"
-                  >
-                    <Link2 className="w-3.5 h-3.5" />
-                    <span>{gmailConnecting ? 'Connecting...' : 'Connect Gmail'}</span>
-                  </button>
-                )}
-              </div>
-            </div>
-            {gmailStatus && !gmailConnected && (
-              <div className="mt-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-                {gmailStatus}
-              </div>
-            )}
-          </div>
-
-          {/* Gmail Messages */}
-          {gmailConnected && (
-            <div className="cyber-card border border-slate-800 overflow-hidden">
-              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-300 flex items-center gap-2">
-                  <MailOpen className="w-3.5 h-3.5 text-emerald-400" />
-                  Live Gmail Messages
-                  <span className="font-mono text-emerald-400">({gmailMessages.length})</span>
-                </span>
-                <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                  REAL DATA — READ-ONLY
-                </span>
-              </div>
-
-              {gmailLoading ? (
-                <div className="py-16 text-center">
-                  <RefreshCw className="w-7 h-7 animate-spin mx-auto mb-3 text-emerald-400" />
-                  <p className="text-sm text-slate-400 font-mono">Fetching from Gmail API...</p>
-                </div>
-              ) : gmailMessages.length === 0 ? (
-                <div className="py-16 text-center text-slate-500 text-sm font-mono">
-                  No messages loaded. Your inbox may be empty or the token may have expired.
-                </div>
-              ) : (
-                <div className="divide-y divide-slate-800/60">
-                  {gmailMessages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className="px-5 py-4 hover:bg-slate-800/30 transition cursor-pointer"
-                      onClick={() => setSelectedGmailMsg(selectedGmailMsg?.id === msg.id ? null : msg)}
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs font-semibold text-slate-200 truncate">
-                              {msg.sender}
-                            </span>
-                            <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20 shrink-0">
-                              {msg.data_source === 'real_gmail_oauth' ? 'LIVE' : 'GMAIL'}
-                            </span>
-                          </div>
-                          <p className="text-sm font-medium text-slate-100 truncate">
-                            {msg.subject}
-                          </p>
-                          <p className="text-xs text-slate-400 mt-1 line-clamp-2">
-                            {msg.snippet}
-                          </p>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <div className="text-[11px] font-mono text-slate-500">
-                            {msg.date ? new Date(parseInt(msg.date)).toLocaleDateString() : ''}
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {/* Expanded detail view */}
-                      {selectedGmailMsg?.id === msg.id && (
-                        <div className="mt-3 p-4 bg-slate-950/80 rounded-lg border border-slate-800 space-y-3">
-                          <div className="grid grid-cols-2 gap-3 text-xs">
-                            <div>
-                              <span className="text-slate-500 block text-[10px] uppercase font-mono">From</span>
-                              <span className="text-slate-300">{msg.sender}</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-500 block text-[10px] uppercase font-mono">Subject</span>
-                              <span className="text-slate-300">{msg.subject}</span>
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block text-[10px] uppercase font-mono mb-1">Snippet / Preview</span>
-                            <p className="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed bg-slate-900/60 p-3 rounded border border-slate-800">
-                              {msg.snippet}
-                            </p>
-                          </div>
-                          <p className="text-[10px] text-emerald-400 font-mono">
-                            ✓ This is a real message fetched securely via Google Gmail API (read-only scope)
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              
-              {gmailConnected && gmailMessages.length > 0 && (
-                <div className="px-5 py-3 border-t border-slate-800 text-center">
-                  <p className="text-[11px] text-slate-500 font-mono">
-                    Showing latest {gmailMessages.length} messages • gmail.readonly scope • No emails are stored permanently
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Not Connected Empty State */}
-          {!gmailConnected && !gmailLoading && (
-            <div className="cyber-card border border-slate-800 py-16 text-center space-y-4">
-              <div className="mx-auto w-16 h-16 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center">
-                <Mail className="w-8 h-8 text-slate-500" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-200">Connect Your Gmail</h3>
-                <p className="text-xs text-slate-400 mt-2 max-w-md mx-auto">
-                  Click "Connect Gmail" above to authorize read-only access to your mailbox.
-                  Your emails will be fetched live from the Gmail API — nothing is stored on our server.
-                </p>
-              </div>
-              <div className="flex items-center justify-center gap-3 text-[11px] text-slate-500 font-mono">
-                <span className="flex items-center gap-1">
-                  <Lock className="w-3 h-3" /> Read-Only
-                </span>
-                <span>•</span>
-                <span className="flex items-center gap-1">
-                  <Globe className="w-3 h-3" /> OAuth 2.0
-                </span>
-                <span>•</span>
-                <span>gmail.readonly scope</span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Email Detail Inspection Modal */}
       {selectedEmail && (
@@ -621,6 +561,13 @@ export default function EmailInvestigationPage() {
                   </span>
                   <SeverityBadge severity={selectedEmail.analysis?.severity} />
                   <RiskScoreBadge score={selectedEmail.analysis?.risk_score} />
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                    selectedEmail.data_source === 'gmail' 
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' 
+                      : 'bg-slate-800 text-slate-400 border-slate-700'
+                  }`}>
+                    {selectedEmail.data_source === 'gmail' ? 'REAL GMAIL MESSAGE' : 'SIMULATED'}
+                  </span>
                 </div>
                 <h2 className="text-lg font-bold text-slate-100 mt-2">{selectedEmail.email_subject}</h2>
                 <p className="text-xs text-slate-400">
@@ -629,7 +576,7 @@ export default function EmailInvestigationPage() {
               </div>
               <button
                 onClick={() => setSelectedEmail(null)}
-                className="text-slate-400 hover:text-slate-200 text-lg font-bold p-1"
+                className="text-slate-400 hover:text-slate-200 text-lg font-bold p-1 cursor-pointer"
               >
                 ✕
               </button>
@@ -644,25 +591,25 @@ export default function EmailInvestigationPage() {
               <div>
                 <span className="text-slate-500 block text-[10px] uppercase font-mono">SPF Check</span>
                 <span className={`font-mono font-semibold ${
-                  selectedEmail.spf_result === 'pass' ? 'text-emerald-400' : 'text-rose-400'
+                  selectedEmail.spf_result === 'pass' ? 'text-emerald-400' : (selectedEmail.spf_result === 'fail' ? 'text-rose-400' : 'text-slate-400')
                 }`}>
-                  {selectedEmail.spf_result.toUpperCase()}
+                  {selectedEmail.spf_result?.toUpperCase()}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block text-[10px] uppercase font-mono">DKIM Signature</span>
                 <span className={`font-mono font-semibold ${
-                  selectedEmail.dkim_result === 'pass' ? 'text-emerald-400' : 'text-rose-400'
+                  selectedEmail.dkim_result === 'pass' ? 'text-emerald-400' : (selectedEmail.dkim_result === 'fail' ? 'text-rose-400' : 'text-slate-400')
                 }`}>
-                  {selectedEmail.dkim_result.toUpperCase()}
+                  {selectedEmail.dkim_result?.toUpperCase()}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block text-[10px] uppercase font-mono">DMARC Alignment</span>
                 <span className={`font-mono font-semibold ${
-                  selectedEmail.dmarc_result === 'pass' ? 'text-emerald-400' : 'text-rose-400'
+                  selectedEmail.dmarc_result === 'pass' ? 'text-emerald-400' : (selectedEmail.dmarc_result === 'fail' ? 'text-rose-400' : 'text-slate-400')
                 }`}>
-                  {selectedEmail.dmarc_result.toUpperCase()}
+                  {selectedEmail.dmarc_result?.toUpperCase()}
                 </span>
               </div>
             </div>
@@ -670,12 +617,12 @@ export default function EmailInvestigationPage() {
             {/* Email Body Content */}
             <div className="bg-slate-950/70 p-4 rounded-lg border border-slate-800">
               <span className="text-[10px] font-mono uppercase text-slate-500 block mb-2">Message Body Content</span>
-              <p className="text-xs text-slate-300 whitespace-pre-wrap font-sans leading-relaxed">
+              <p className="text-xs text-slate-300 whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto">
                 {selectedEmail.email_body}
               </p>
             </div>
 
-            {/* Non-Clickable Extracted URLs */}
+            {/* Extracted URLs */}
             {selectedEmail.urls && (
               <div className="bg-rose-500/5 border border-rose-500/20 p-3 rounded-lg">
                 <span className="text-[10px] font-mono uppercase text-rose-400 block mb-1">
@@ -693,7 +640,6 @@ export default function EmailInvestigationPage() {
                 Explainable Risk Signals & Model Attribution
               </h3>
               
-              {/* Component breakdown bars */}
               {selectedEmail.analysis && (
                 <div className="grid grid-cols-3 gap-3 text-xs bg-slate-900/50 p-3 rounded border border-slate-800">
                   <div>
@@ -721,57 +667,19 @@ export default function EmailInvestigationPage() {
               </ul>
             </div>
 
-            {/* Recommended Response Actions */}
-            <div className="bg-sky-500/5 border border-sky-500/20 p-4 rounded-lg">
-              <h4 className="text-xs font-bold text-sky-400 uppercase tracking-wider font-mono mb-2">
-                Recommended Incident Response Actions
-              </h4>
-              <ul className="space-y-1">
-                {selectedEmail.analysis?.recommended_actions?.map((act, idx) => (
-                  <li key={idx} className="text-xs text-slate-300 flex items-center gap-2">
-                    <CheckCircle className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                    <span>{act}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Related Logins for Same User */}
-            {selectedEmail.related_logins && selectedEmail.related_logins.length > 0 && (
-              <div>
-                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono mb-2">
-                  Correlated User Logins ({selectedEmail.user_id})
-                </h4>
-                <div className="space-y-1.5">
-                  {selectedEmail.related_logins.map(l => (
-                    <div key={l.event_id} className="flex items-center justify-between p-2 bg-slate-900/60 border border-slate-800 rounded text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-slate-400">{l.event_id}</span>
-                        <span className="text-slate-200">{l.location} ({l.ip_address})</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <RiskScoreBadge score={l.risk_score} />
-                        <SeverityBadge severity={l.severity} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {/* Modal Footer */}
             <div className="flex items-center justify-between pt-4 border-t border-slate-800">
               <button
                 onClick={() => handleReanalyze(selectedEmail.email_id)}
                 disabled={reanalyzing}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-300 border border-slate-700 transition"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-300 border border-slate-700 transition cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${reanalyzing ? 'animate-spin' : ''}`} />
                 <span>Re-run AI Analysis</span>
               </button>
               <button
                 onClick={() => setSelectedEmail(null)}
-                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-200 transition"
+                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-200 transition cursor-pointer"
               >
                 Close Inspector
               </button>
@@ -790,7 +698,7 @@ export default function EmailInvestigationPage() {
                 <Send className="w-4 h-4 text-sky-400" />
                 <span>Real-Time Phishing Classifier Sandbox</span>
               </h2>
-              <button onClick={() => { setShowAnalyzer(false); setAnalyzerResult(null); }} className="text-slate-400 hover:text-slate-200">
+              <button onClick={() => { setShowAnalyzer(false); setAnalyzerResult(null); }} className="text-slate-400 hover:text-slate-200 cursor-pointer">
                 ✕
               </button>
             </div>
@@ -798,7 +706,7 @@ export default function EmailInvestigationPage() {
             <form onSubmit={handleRunAnalyzer} className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[11px] font-mono text-slate-400 block mb-1">Recipient User ID</label>
+                  <label className="text-[11px] font-mono text-slate-400 block mb-1">Recipient User</label>
                   <input
                     type="text"
                     value={analyzerForm.user_id}
@@ -891,7 +799,7 @@ export default function EmailInvestigationPage() {
               <button
                 type="submit"
                 disabled={analyzerLoading}
-                className="w-full py-2 bg-sky-600 hover:bg-sky-500 font-semibold rounded text-xs text-white transition flex items-center justify-center gap-2"
+                className="w-full py-2 bg-sky-600 hover:bg-sky-500 font-semibold rounded text-xs text-white transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 {analyzerLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                 <span>Evaluate with ML Model</span>

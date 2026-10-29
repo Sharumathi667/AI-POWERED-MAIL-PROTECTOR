@@ -20,6 +20,7 @@ export const fetchEmails = (params) => api.get('/emails', { params }).then(res =
 export const fetchEmailDetails = (id) => api.get(`/emails/${id}`).then(res => res.data);
 export const analyzeCustomEmail = (data) => api.post('/emails/analyze', data).then(res => res.data);
 export const reanalyzeEmail = (id) => api.post(`/emails/${id}/reanalyze`).then(res => res.data);
+export const syncGmailInbox = () => api.post('/emails/sync-gmail').then(res => res.data);
 
 // Logins
 export const fetchLogins = (params) => api.get('/logins', { params }).then(res => res.data);

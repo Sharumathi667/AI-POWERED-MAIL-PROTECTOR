@@ -12,6 +12,7 @@ from backend.app.models.entities import User, AuditLog
 from backend.app.services.auth_service import (
     auth_service, get_current_user_optional, get_current_user
 )
+from backend.app.services.gmail_sync_service import sync_user_gmail
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -58,7 +59,7 @@ def get_auth_config():
 
 @router.get("/google/url")
 def get_google_auth_url():
-    """Generates the Google OAuth 2.0 authorization URL for OpenID Connect sign-in."""
+    """Generates the Google OAuth 2.0 authorization URL requesting profile and Gmail read-only scopes."""
     if not is_google_oauth_configured():
         raise HTTPException(
             status_code=400,
@@ -70,9 +71,9 @@ def get_google_auth_url():
         "client_id": settings.GOOGLE_CLIENT_ID,
         "redirect_uri": settings.GOOGLE_REDIRECT_URI,
         "response_type": "code",
-        "scope": "openid email profile",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.readonly",
         "access_type": "offline",
-        "prompt": "select_account",
+        "prompt": "consent select_account",
         "state": "shieldsoc_auth_state"
     }
     url = f"{base_url}?{urllib.parse.urlencode(params)}"
@@ -97,6 +98,9 @@ async def google_auth_callback(
         # Exchange code for token
         tokens = await auth_service.exchange_google_code(code, settings.GOOGLE_REDIRECT_URI)
         id_token = tokens.get("id_token")
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+
         if not id_token:
             raise HTTPException(status_code=400, detail="Missing id_token in Google response")
 
@@ -115,9 +119,13 @@ async def google_auth_callback(
             user.google_sub = google_sub
             user.full_name = name
             user.picture_url = picture
+            if access_token:
+                user.gmail_connected = True
+                user.gmail_access_token = access_token
+            if refresh_token:
+                user.gmail_refresh_token = refresh_token
         else:
             username = email.split("@")[0]
-            # Ensure unique username
             base_un = username
             count = 1
             while db.query(User).filter(User.username == username).first():
@@ -130,6 +138,9 @@ async def google_auth_callback(
                 full_name=name,
                 google_sub=google_sub,
                 picture_url=picture,
+                gmail_connected=bool(access_token),
+                gmail_access_token=access_token,
+                gmail_refresh_token=refresh_token,
                 role="admin" if "admin" in email else "analyst",
                 is_active=True
             )
@@ -137,6 +148,13 @@ async def google_auth_callback(
 
         db.commit()
         db.refresh(user)
+
+        # Trigger immediate background sync of real Gmail emails
+        if user.gmail_access_token:
+            try:
+                await sync_user_gmail(user, db, max_results=30)
+            except Exception as sync_err:
+                print(f"[Initial Gmail Sync Warning]: {sync_err}")
 
         # Create session token
         session_token = auth_service.create_session_token(user)
@@ -147,14 +165,14 @@ async def google_auth_callback(
             target_type="user",
             target_id=str(user.id),
             actor=user.email,
-            details=json.dumps({"google_sub": google_sub, "name": name}),
+            details=json.dumps({"google_sub": google_sub, "name": name, "gmail_connected": user.gmail_connected}),
             is_simulated=False
         )
         db.add(audit)
         db.commit()
 
         # Redirect to frontend dashboard and set HTTP-only cookie
-        redirect_target = f"{settings.FRONTEND_URL}/"
+        redirect_target = f"{settings.FRONTEND_URL}/emails"
         response = RedirectResponse(url=redirect_target, status_code=302)
         response.set_cookie(
             key=settings.SESSION_COOKIE_NAME,

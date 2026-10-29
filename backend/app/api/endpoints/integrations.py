@@ -10,6 +10,7 @@ from backend.app.core.config import settings
 from backend.app.database.session import get_db
 from backend.app.models.entities import User, AuditLog
 from backend.app.services.auth_service import get_current_user_optional, get_current_user, auth_service
+from backend.app.services.gmail_sync_service import sync_user_gmail
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
 
@@ -83,16 +84,16 @@ async def gmail_callback(
 ):
     """Callback for Gmail API OAuth consent."""
     if error:
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/integrations?error={urllib.parse.quote(error)}")
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/emails?error={urllib.parse.quote(error)}")
 
     if not code or not state or not state.startswith("user_"):
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/integrations?error=invalid_state")
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/emails?error=invalid_state")
 
     try:
         user_id = int(state.replace("user_", ""))
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
-            return RedirectResponse(url=f"{settings.FRONTEND_URL}/integrations?error=user_not_found")
+            return RedirectResponse(url=f"{settings.FRONTEND_URL}/emails?error=user_not_found")
 
         tokens = await auth_service.exchange_google_code(code, settings.GMAIL_REDIRECT_URI)
         access_token = tokens.get("access_token")
@@ -114,11 +115,17 @@ async def gmail_callback(
         db.add(audit)
         db.commit()
 
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/integrations?status=gmail_connected")
+        # Immediate sync
+        try:
+            await sync_user_gmail(user, db, max_results=30)
+        except Exception as e:
+            print(f"[Initial Sync in Callback Error]: {e}")
+
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/emails?status=gmail_connected")
 
     except Exception as e:
         print(f"[Gmail Callback Error]: {e}")
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/integrations?error={urllib.parse.quote(str(e))}")
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/emails?error={urllib.parse.quote(str(e))}")
 
 @router.post("/gmail/disconnect")
 def disconnect_gmail(
@@ -142,102 +149,3 @@ def disconnect_gmail(
     db.commit()
 
     return {"message": "Gmail integration disconnected successfully", "connected": False}
-
-@router.get("/gmail/messages")
-async def get_real_gmail_messages(
-    user: User = Depends(get_current_user)
-):
-    """Fetches real Gmail inbox messages if Gmail integration is connected."""
-    if not user.gmail_connected or not user.gmail_access_token:
-        return {
-            "connected": False,
-            "messages": [],
-            "message": "Gmail integration is not connected. Use 'Connect Gmail' to authorize read-only access."
-        }
-
-    try:
-        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20"
-        headers = {"Authorization": f"Bearer {user.gmail_access_token}"}
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code == 401:
-                # Token expired — try to refresh if we have a refresh token
-                if user.gmail_refresh_token:
-                    refreshed = await _refresh_gmail_token(user, client)
-                    if refreshed:
-                        headers = {"Authorization": f"Bearer {user.gmail_access_token}"}
-                        resp = await client.get(url, headers=headers)
-                    else:
-                        return {
-                            "connected": False,
-                            "messages": [],
-                            "message": "Gmail access token expired and refresh failed. Please re-authorize."
-                        }
-                else:
-                    return {
-                        "connected": False,
-                        "messages": [],
-                        "message": "Gmail access token expired. Please re-authorize."
-                    }
-            if resp.status_code != 200:
-                return {
-                    "connected": False,
-                    "messages": [],
-                    "message": f"Gmail API returned {resp.status_code}: {resp.text}"
-                }
-            
-            data = resp.json()
-            message_ids = data.get("messages", [])
-            messages = []
-
-            for m in message_ids[:15]:
-                m_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{m['id']}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date"
-                m_resp = await client.get(m_url, headers=headers)
-                if m_resp.status_code == 200:
-                    m_data = m_resp.json()
-                    headers_list = m_data.get("payload", {}).get("headers", [])
-                    subject = next((h["value"] for h in headers_list if h["name"].lower() == "subject"), "No Subject")
-                    sender = next((h["value"] for h in headers_list if h["name"].lower() == "from"), "Unknown Sender")
-                    date = next((h["value"] for h in headers_list if h["name"].lower() == "date"), "")
-                    messages.append({
-                        "id": m["id"],
-                        "subject": subject,
-                        "sender": sender,
-                        "snippet": m_data.get("snippet", ""),
-                        "date": m_data.get("internalDate", ""),
-                        "labelIds": m_data.get("labelIds", []),
-                        "data_source": "real_gmail_oauth"
-                    })
-
-            return {
-                "connected": True,
-                "messages": messages,
-                "message": f"Successfully loaded {len(messages)} live messages via official Gmail API."
-            }
-
-    except Exception as e:
-        return {
-            "connected": False,
-            "messages": [],
-            "message": f"Failed to fetch Gmail messages: {str(e)}"
-        }
-
-
-async def _refresh_gmail_token(user: User, client: httpx.AsyncClient) -> bool:
-    """Attempt to refresh the Gmail access token using the stored refresh token."""
-    try:
-        token_url = "https://oauth2.googleapis.com/token"
-        data = {
-            "client_id": settings.GOOGLE_CLIENT_ID,
-            "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "refresh_token": user.gmail_refresh_token,
-            "grant_type": "refresh_token"
-        }
-        resp = await client.post(token_url, data=data)
-        if resp.status_code == 200:
-            tokens = resp.json()
-            user.gmail_access_token = tokens.get("access_token", user.gmail_access_token)
-            return True
-        return False
-    except Exception:
-        return False
