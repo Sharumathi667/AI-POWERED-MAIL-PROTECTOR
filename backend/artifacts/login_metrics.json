@@ -1,0 +1,43 @@
+{
+  "model_name": "Isolation Forest + Heuristic Guardrails",
+  "model_version": "login-v1.0",
+  "trained_at": "2026-10-29T11:25:14.740049",
+  "total_dataset_size": 10526,
+  "train_size": 8420,
+  "test_size": 2106,
+  "contamination": 0.18,
+  "features": [
+    "login_hour",
+    "day_of_week",
+    "failed_attempts",
+    "is_new_device",
+    "is_new_location",
+    "distance_from_usual_location_km",
+    "minutes_since_previous_login",
+    "login_success",
+    "impossible_travel"
+  ],
+  "score_calibration": {
+    "min_val": -0.14275283629698365,
+    "max_val": 0.18846009453339202
+  },
+  "class_distribution": {
+    "suspicious": 1514,
+    "normal": 9012
+  },
+  "metrics": {
+    "accuracy": 0.9691,
+    "precision": 0.8234,
+    "recall": 1.0,
+    "f1_score": 0.9031,
+    "roc_auc": 0.9962,
+    "false_positive_rate": 0.0361,
+    "false_negative_rate": 0.0,
+    "confusion_matrix": {
+      "true_negative": 1738,
+      "false_positive": 65,
+      "false_negative": 0,
+      "true_positive": 303
+    }
+  }
+}
